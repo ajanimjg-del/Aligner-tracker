@@ -1,0 +1,11 @@
+import {test} from 'node:test';
+import assert from 'node:assert/strict';
+import {totals,validate,dayBounds,duration} from '../core.mjs';
+const t=s=>new Date(s).getTime();
+const base={version:1,startedAt:t('2026-11-14T00:00:00'),goalHours:22,breaks:[]};
+test('overnight break splits at local midnight',()=>{const s={...base,breaks:[{id:'a',start:t('2026-11-14T23:50:00'),end:t('2026-11-15T00:20:00'),note:''}]};const now=t('2026-11-15T12:00:00');assert.equal(totals(s,'2026-11-14',now).out,600000);assert.equal(totals(s,'2026-11-15',now).out,1200000);});
+test('ongoing break resumes from saved timestamp over multiple days',()=>{const s={...base,breaks:[{id:'a',start:t('2026-11-14T23:50:00'),end:null,note:''}]};const restored=validate(JSON.parse(JSON.stringify(s)),t('2026-11-16T12:00:00'));assert.equal(totals(restored,'2026-11-15',t('2026-11-16T12:00:00')).out,86400000);});
+test('first day does not invent earlier wear',()=>{const s={...base,startedAt:t('2026-11-14T12:00:00')};assert.equal(totals(s,'2026-11-14',t('2026-11-14T13:00:00')).wear,3600000);assert.equal(totals(s,'2026-11-13').wear,0);});
+test('DST days use calendar boundaries',()=>{const [a,b]=dayBounds('2026-03-29');assert.equal(b-a,23*3600000);const [c,d]=dayBounds('2026-10-25');assert.equal(d-c,25*3600000);});
+test('invalid and overlapping backups rejected; adjacent breaks allowed',()=>{const b={id:'a',start:base.startedAt+100,end:base.startedAt+200,note:''};assert.throws(()=>validate({...base,breaks:[b,{...b,id:'b'}]}));assert.throws(()=>validate({...base,breaks:[{...b,end:b.start}]}));assert.throws(()=>validate({...base,version:2}));assert.throws(()=>validate({...base,goalHours:NaN}));assert.throws(()=>validate({...base,breaks:[{...b,end:null},{...b,id:'b',start:b.end,end:b.end+100}]}));assert.equal(validate({...base,breaks:[b,{...b,id:'b',start:b.end,end:b.end+100}]}).breaks.length,2);});
+test('duration does not wrap at 24 hours',()=>assert.equal(duration(25*3600000),'25:00:00'));
