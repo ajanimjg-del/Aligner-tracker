@@ -1,3 +1,4 @@
+import {previewCSV,mergeCSV} from './csv.mjs';
 import {KEY,dayKey,dayBounds,totals,duration,validate,saveBreak,dueReminder} from './core.mjs';
 const $=id=>document.getElementById(id);
 let state,raw,blocked=false;
@@ -33,10 +34,10 @@ function renderHistory(){const [lo,hi]=dayBounds($('day').value||dayKey(Date.now
 function render(){tick();renderHistory();}
 $('toggle').onclick=()=>act(()=>{const b=active(),now=Date.now();commit({...state,breaks:b?state.breaks.map(x=>x.id===b.id?{...x,end:now}:x):[...state.breaks,{id:crypto.randomUUID(),start:now,end:null,note:''}]});});
 $('day').onchange=render;
-let editRaw;
-function edit(b){editRaw=raw;$('editId').value=b?.id||'';$('start').value=localInput(b?.start??Date.now()-60000);$('end').value=b?(b.end?localInput(b.end):''):localInput(Date.now());$('note').value=b?.note||'';$('estimatedStart').checked=b?.estimatedStart??!b;$('estimatedEnd').checked=b?.estimatedEnd??!b;$('delete').hidden=!b;$('editTitle').textContent=b?'Edit break':'Add a missed break';$('editError').textContent='';$('editor').showModal();}
+let editRaw,editOriginal,editStartValue,editEndValue;
+function edit(b){editRaw=raw;editOriginal=b?{...b}:null;$('editId').value=b?.id||'';$('start').value=localInput(b?.start??Date.now()-60000);$('end').value=b?(b.end?localInput(b.end):''):localInput(Date.now());$('note').value=b?.note||'';$('estimatedStart').checked=b?.estimatedStart??!b;$('estimatedEnd').checked=b?.estimatedEnd??!b;$('delete').hidden=!b;$('editTitle').textContent=b?'Edit break':'Add a missed break';$('editError').textContent='';editStartValue=$('start').value;editEndValue=$('end').value;$('editor').showModal();}
 $('add').onclick=()=>edit();$('cancel').onclick=()=>$('editor').close();
-$('editForm').onsubmit=e=>{e.preventDefault();try{if(editRaw!==raw)throw Error('History changed while you were editing. Cancel and reopen this break.');const b={id:$('editId').value||crypto.randomUUID(),start:parseInput($('start').value),end:parseInput($('end').value),note:$('note').value.trim(),estimatedStart:$('estimatedStart').checked,estimatedEnd:!!$('end').value&&$('estimatedEnd').checked};commit(saveBreak(state,b));$('editor').close();}catch(e){$('editError').textContent=e.message;}};
+$('editForm').onsubmit=e=>{e.preventDefault();try{if(editRaw!==raw)throw Error('History changed while you were editing. Cancel and reopen this break.');const b={id:$('editId').value||crypto.randomUUID(),start:editOriginal&&$('start').value===editStartValue?editOriginal.start:parseInput($('start').value),end:editOriginal&&$('end').value===editEndValue?editOriginal.end:parseInput($('end').value),note:$('note').value.trim(),estimatedStart:$('estimatedStart').checked,estimatedEnd:!!$('end').value&&$('estimatedEnd').checked};commit(saveBreak(state,b));$('editor').close();}catch(e){$('editError').textContent=e.message;}};
 $('delete').onclick=()=>{if(confirm('Delete this break? Its time will be removed from your time-out total.'))act(()=>{commit({...state,breaks:state.breaks.filter(b=>b.id!==$('editId').value)});$('editor').close();});};
 $('settings').onsubmit=e=>{e.preventDefault();act(()=>{commit({...state,goalHours:24-Number($('goal').value)/60});message('Daily allowance saved.');});};
 function download(text,name){const url=URL.createObjectURL(new Blob([text],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
@@ -104,3 +105,32 @@ function notificationReturn(){
 }
 window.addEventListener('hashchange',notificationReturn);
 syncReminders();render();notificationReturn();
+
+// Preview is read-only. A single synchronous localStorage replacement commits
+// the fully validated merge; no row-by-row writes or clears are performed.
+let csvText='',csvSnapshot=null,csvPlan=null,csvReading=false;
+function showCSVPreview(){
+  const current=localStorage.getItem(KEY);
+  if(blocked||current!==raw)throw Error('Saved data changed or is unavailable. Close this preview, reload the app, then choose the CSV again. Nothing imported.');
+  csvPlan=previewCSV(csvText,state);csvSnapshot=raw;
+  $('csvSummary').textContent=`${csvPlan.ready} ready to import · ${csvPlan.skipped} duplicates skipped · ${csvPlan.rejected} rejected`;
+  $('csvRows').replaceChildren();
+  for(const r of csvPlan.rows){const item=document.createElement('li');item.textContent=`Line ${r.line}: ${r.status}. ${r.start!==undefined?`${new Date(r.start).toLocaleString()} → ${new Date(r.end).toLocaleString()}. `:''}${r.reason}`;$('csvRows').append(item);}
+  $('csvConfirm').disabled=!csvPlan.ready;$('csvError').textContent='';
+}
+$('csvImport').onclick=()=>$('csvFile').click();
+$('csvFile').onchange=async()=>{
+  if(csvReading)return;csvReading=true;
+  try{const file=$('csvFile').files[0];if(!file)return;if(file.size>2000000)throw Error('CSV must be smaller than 2 MB.');csvText=await file.text();showCSVPreview();$('csvDialog').showModal();}
+  catch(e){message(e.message);}finally{$('csvFile').value='';csvReading=false;}
+};
+$('csvCancel').onclick=()=>{csvPlan=null;csvSnapshot=null;csvText='';$('csvDialog').close();};
+$('csvRefresh').onclick=()=>{try{showCSVPreview();}catch(e){$('csvError').textContent=e.message;$('csvConfirm').disabled=true;}};
+$('csvConfirm').onclick=()=>{
+  try{
+    if(!csvPlan||!csvPlan.ready)throw Error('No records are ready to import.');
+    if(raw!==csvSnapshot||localStorage.getItem(KEY)!==csvSnapshot){$('csvConfirm').disabled=true;throw Error('Data changed since this preview. Refresh the preview and review it again before importing.');}
+    const checked=previewCSV(csvText,state),next=mergeCSV(state,checked,()=>crypto.randomUUID());
+    commit(next);csvPlan=null;csvSnapshot=null;csvText='';$('csvDialog').close();message(`Imported ${checked.ready} breaks. Skipped ${checked.skipped} duplicates; rejected ${checked.rejected} records. Existing history and settings were preserved.`);
+  }catch(e){$('csvError').textContent=`Import was not completed: ${e.message}`;}
+};
